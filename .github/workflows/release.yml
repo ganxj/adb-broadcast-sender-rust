@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Upload artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/adb-broadcast-sender.exe
+          generate_release_notes: true
