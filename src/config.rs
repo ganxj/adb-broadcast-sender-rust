@@ -18,6 +18,8 @@ pub struct Config {
     pub window_height: u32,
     #[serde(default)]
     pub quick_contents: Vec<String>,
+    #[serde(default = "default_screenshot_dir")]
+    pub screenshot_dir: String,
 }
 
 fn default_adb_path() -> String {
@@ -40,6 +42,10 @@ fn default_window_height() -> u32 {
     700
 }
 
+fn default_screenshot_dir() -> String {
+    r#"D:\data\files\adb"#.to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -50,6 +56,7 @@ impl Default for Config {
             window_width: default_window_width(),
             window_height: default_window_height(),
             quick_contents: Vec::new(),
+            screenshot_dir: default_screenshot_dir(),
         }
     }
 }
@@ -128,6 +135,11 @@ impl ConfigManager {
 
     pub fn set_quick_contents(&mut self, contents: Vec<String>) -> Result<(), String> {
         self.config.quick_contents = contents;
+        self.save()
+    }
+
+    pub fn set_screenshot_dir(&mut self, path: &str) -> Result<(), String> {
+        self.config.screenshot_dir = path.to_string();
         self.save()
     }
 

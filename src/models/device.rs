@@ -73,6 +73,20 @@ impl Device {
             "USB".to_string()
         }
     }
+
+    pub fn wifi_endpoint(&self) -> Option<(String, u16)> {
+        if self.connection != "wifi" {
+            return None;
+        }
+
+        if !self.ip_address.is_empty() {
+            return Some((self.ip_address.clone(), self.port.unwrap_or(5555)));
+        }
+
+        let (ip, port) = self.serial.rsplit_once(':')?;
+        let port = port.parse::<u16>().ok()?;
+        Some((ip.to_string(), port))
+    }
 }
 
 impl fmt::Display for Device {

@@ -6,6 +6,8 @@ use crate::models::device::Device;
 use crate::adb::device_manager::DeviceManager;
 use std::os::windows::process::CommandExt;
 use std::sync::{Arc, Mutex};
+use std::fs;
+use std::path::PathBuf;
 use std::thread;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -72,6 +74,7 @@ enum BgOp {
     ConnectWifi,
     DisconnectWifi,
     SendBroadcast,
+    TakeScreenshot,
 }
 
 #[derive(Clone, Debug)]
@@ -120,21 +123,21 @@ fn main() -> Result<(), eframe::Error> {
 }
 
 // ===== Color Palette (matching original web UI) =====
-const C_PRIMARY: egui::Color32 = egui::Color32::from_rgb(33, 150, 243);
-const C_PRIMARY_HOVER: egui::Color32 = egui::Color32::from_rgb(25, 118, 210);
-const C_SUCCESS: egui::Color32 = egui::Color32::from_rgb(76, 175, 80);
-const C_SUCCESS_HOVER: egui::Color32 = egui::Color32::from_rgb(56, 142, 60);
-const C_DANGER: egui::Color32 = egui::Color32::from_rgb(244, 67, 54);
-const C_DANGER_HOVER: egui::Color32 = egui::Color32::from_rgb(211, 47, 47);
-const C_SECONDARY: egui::Color32 = egui::Color32::from_rgb(117, 117, 117);
-const C_SECONDARY_HOVER: egui::Color32 = egui::Color32::from_rgb(97, 97, 97);
-const C_BG: egui::Color32 = egui::Color32::from_rgb(248, 249, 250);
+const C_PRIMARY: egui::Color32 = egui::Color32::from_rgb(28, 126, 214);
+const C_PRIMARY_HOVER: egui::Color32 = egui::Color32::from_rgb(24, 100, 171);
+const C_SUCCESS: egui::Color32 = egui::Color32::from_rgb(47, 158, 68);
+const C_SUCCESS_HOVER: egui::Color32 = egui::Color32::from_rgb(43, 138, 62);
+const C_DANGER: egui::Color32 = egui::Color32::from_rgb(224, 49, 49);
+const C_DANGER_HOVER: egui::Color32 = egui::Color32::from_rgb(201, 42, 42);
+const C_SECONDARY: egui::Color32 = egui::Color32::from_rgb(91, 103, 117);
+const C_SECONDARY_HOVER: egui::Color32 = egui::Color32::from_rgb(73, 84, 97);
+const C_BG: egui::Color32 = egui::Color32::from_rgb(245, 247, 250);
 const C_CARD: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
-const C_TEXT: egui::Color32 = egui::Color32::from_rgb(51, 51, 51);
-const C_TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(102, 102, 102);
-const C_TEXT_LIGHT: egui::Color32 = egui::Color32::from_rgb(153, 153, 153);
-const C_WIFI_BG: egui::Color32 = egui::Color32::from_rgb(240, 247, 255);
-const C_QUICK_BG: egui::Color32 = egui::Color32::from_rgb(227, 242, 253);
+const C_TEXT: egui::Color32 = egui::Color32::from_rgb(33, 37, 41);
+const C_TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(92, 99, 112);
+const C_TEXT_LIGHT: egui::Color32 = egui::Color32::from_rgb(134, 142, 150);
+const C_WIFI_BG: egui::Color32 = egui::Color32::from_rgb(239, 247, 255);
+const C_QUICK_BG: egui::Color32 = egui::Color32::from_rgb(232, 244, 255);
 const C_QUICK_BORDER: egui::Color32 = egui::Color32::from_rgb(144, 202, 249);
 const C_QUICK_TEXT: egui::Color32 = egui::Color32::from_rgb(25, 118, 210);
 const C_SUCCESS_BG: egui::Color32 = egui::Color32::from_rgb(232, 245, 233);
@@ -143,15 +146,15 @@ const C_ERROR_BG: egui::Color32 = egui::Color32::from_rgb(255, 235, 238);
 const C_ERROR_TEXT: egui::Color32 = egui::Color32::from_rgb(198, 40, 40);
 const C_INFO_BG: egui::Color32 = egui::Color32::from_rgb(227, 242, 253);
 const C_INFO_TEXT: egui::Color32 = egui::Color32::from_rgb(21, 101, 192);
-const C_INFO_BOX_BG: egui::Color32 = egui::Color32::from_rgb(249, 249, 249);
-const C_INPUT_BORDER: egui::Color32 = egui::Color32::from_rgb(210, 213, 218);
+const C_INFO_BOX_BG: egui::Color32 = egui::Color32::from_rgb(248, 250, 252);
+const C_INPUT_BORDER: egui::Color32 = egui::Color32::from_rgb(206, 212, 218);
 const C_INPUT_FOCUS: egui::Color32 = egui::Color32::from_rgb(33, 150, 243);
-const MAX_CARD_WIDTH: f32 = 860.0;
+const MAX_CARD_WIDTH: f32 = 840.0;
 
 fn setup_custom_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(16.0, 8.0);
+    style.spacing.button_padding = egui::vec2(14.0, 9.0);
     style.visuals.panel_fill = C_BG;
     style.visuals.window_fill = C_BG;
     style.visuals.window_rounding = egui::Rounding::same(8.0);
@@ -179,10 +182,15 @@ struct AdbBroadcastApp {
     quick_contents: Vec<String>,
     selected_device_serial: String,
     show_adb_path_dialog: bool,
+    show_screenshot_dir_dialog: bool,
     adb_path_input: String,
+    screenshot_dir_input: String,
     last_connected_ip: Option<String>,
     pending_action: String,
     bg_queue: Arc<Mutex<Vec<BgTaskResult>>>,
+    toast_message: Option<String>,
+    toast_remaining: f64,
+    toast_is_error: bool,
 }
 
 impl AdbBroadcastApp {
@@ -205,10 +213,15 @@ impl AdbBroadcastApp {
             ],
             selected_device_serial: String::new(),
             show_adb_path_dialog: false,
+            show_screenshot_dir_dialog: false,
             adb_path_input: String::new(),
+            screenshot_dir_input: String::new(),
             last_connected_ip: None,
             pending_action: String::new(),
             bg_queue: Arc::new(Mutex::new(Vec::new())),
+            toast_message: None,
+            toast_remaining: 0.0,
+            toast_is_error: false,
         };
 
         // Merge saved quick contents
@@ -398,7 +411,6 @@ impl AdbBroadcastApp {
                 }
                 BgOp::SendBroadcast => {
                     self.pending_action.clear();
-                    // Add to history
                     if let (Some(content), Some(device)) = (&result.broadcast_content, &result.broadcast_device) {
                         let error = if result.success { None } else { Some(result.message.as_str()) };
                         self.state.add_broadcast_history(content, device, result.success, error);
@@ -406,6 +418,20 @@ impl AdbBroadcastApp {
                     if result.success {
                         self.content_input.clear();
                         self.state.set_status("Broadcast sent successfully!", StatusType::Success);
+                    } else {
+                        self.toast_message = Some(result.message.clone());
+                        self.toast_remaining = 4.0;
+                        self.toast_is_error = true;
+                        self.state.set_status(&result.message, StatusType::Error);
+                    }
+                }
+                BgOp::TakeScreenshot => {
+                    self.pending_action.clear();
+                    if result.success {
+                        self.toast_message = Some(result.message.clone());
+                        self.toast_remaining = 4.0;
+                        self.toast_is_error = false;
+                        self.state.set_status(&result.message, StatusType::Success);
                     } else {
                         self.state.set_status(&result.message, StatusType::Error);
                     }
@@ -453,6 +479,99 @@ impl AdbBroadcastApp {
         });
     }
 
+    fn screenshot_dir(path: &str) -> Result<PathBuf, String> {
+        let screenshot_dir = PathBuf::from(path.trim());
+        if screenshot_dir.as_os_str().is_empty() {
+            return Err("Screenshot directory cannot be empty".to_string());
+        }
+        fs::create_dir_all(&screenshot_dir)
+            .map_err(|e| format!("Failed to create screenshot directory: {}", e))?;
+        Ok(screenshot_dir)
+    }
+
+    fn screenshot_file_name(device_serial: &str) -> String {
+        let safe_serial: String = device_serial
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        format!("screenshot_{}_{}.png", safe_serial, timestamp)
+    }
+
+    fn spawn_screenshot(&self, device_serial: String) {
+        let adb_path = self.state.config_manager.get().adb_path.clone();
+        let screenshot_dir = self.state.config_manager.get().screenshot_dir.clone();
+        let queue = self.bg_queue.clone();
+        thread::spawn(move || {
+            let output = std::process::Command::new(&adb_path)
+                .creation_flags(0x08000000)
+                .args(["-s", &device_serial, "exec-out", "screencap", "-p"])
+                .output();
+
+            match output {
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                    let result = if !o.status.success() {
+                        Err(if stderr.is_empty() {
+                            "Screenshot command failed".to_string()
+                        } else {
+                            stderr
+                        })
+                    } else if o.stdout.is_empty() {
+                        Err("Screenshot returned empty image data".to_string())
+                    } else {
+                        Self::screenshot_dir(&screenshot_dir).and_then(|dir| {
+                            let file_path = dir.join(Self::screenshot_file_name(&device_serial));
+                            fs::write(&file_path, &o.stdout)
+                                .map_err(|e| format!("Failed to save screenshot: {}", e))?;
+                            Ok(file_path)
+                        })
+                    };
+
+                    let _ = queue.lock().map(|mut q| match result {
+                        Ok(file_path) => q.push(BgTaskResult {
+                            op: BgOp::TakeScreenshot,
+                            success: true,
+                            message: format!("Screenshot saved successfully: {}", file_path.display()),
+                            devices: None,
+                            broadcast_content: None,
+                            broadcast_device: None,
+                        }),
+                        Err(e) => q.push(BgTaskResult {
+                            op: BgOp::TakeScreenshot,
+                            success: false,
+                            message: e,
+                            devices: None,
+                            broadcast_content: None,
+                            broadcast_device: None,
+                        }),
+                    });
+                }
+                Err(e) => {
+                    let _ = queue.lock().map(|mut q| {
+                        q.push(BgTaskResult {
+                            op: BgOp::TakeScreenshot,
+                            success: false,
+                            message: format!("Screenshot failed: {}", e),
+                            devices: None,
+                            broadcast_content: None,
+                            broadcast_device: None,
+                        });
+                    });
+                }
+            }
+        });
+    }
+    fn connect_wifi_from_inputs(&mut self) {
+        let port = self.wifi_port.parse::<u16>().unwrap_or(5555);
+        let ip = self.wifi_ip.trim().to_string();
+        if ip.is_empty() {
+            self.state.set_status("Please enter IP address", StatusType::Error);
+        } else {
+            self.pending_action = "Connecting...".to_string();
+            self.spawn_connect(ip, port);
+        }
+    }
     fn spawn_connect(&self, ip: String, port: u16) {
         let adb_path = self.state.config_manager.get().adb_path.clone();
         let queue = self.bg_queue.clone();
@@ -712,23 +831,52 @@ impl eframe::App for AdbBroadcastApp {
                                         self.adb_path_input = self.state.config_manager.get().adb_path.clone();
                                         self.show_adb_path_dialog = true;
                                     }
+                                    ui.add_space(8.0);
+                                    if secondary_button(ui, "Screenshot Dir").clicked() {
+                                        self.screenshot_dir_input = self.state.config_manager.get().screenshot_dir.clone();
+                                        self.show_screenshot_dir_dialog = true;
+                                    }
                                 });
 
                                 // Device info
-                                if let Some(ref device) = self.state.selected_device {
-                                    ui.add_space(10.0);
+                                if let Some(device) = self.state.selected_device.clone() {
+                                    let wifi_endpoint = device.wifi_endpoint();
+                                    ui.add_space(12.0);
                                     info_box(ui, |ui| {
-                                        ui.label(egui::RichText::new(&device.display_name()).strong().size(14.0).color(C_TEXT));
-                                        ui.add_space(2.0);
-                                        ui.label(egui::RichText::new(format!("Serial: {}", device.serial)).size(13.0).color(C_TEXT_MUTED));
-                                        ui.label(egui::RichText::new(format!("State: {}", device.state)).size(13.0).color(C_TEXT_MUTED));
-                                        ui.label(egui::RichText::new(format!("Connection: {}", device.connection_info())).size(13.0).color(C_TEXT_MUTED));
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.set_min_width((ui.available_width() - 112.0).max(260.0));
+                                                ui.label(egui::RichText::new(&device.display_name()).strong().size(14.0).color(C_TEXT));
+                                                ui.add_space(8.0);
+                                                ui.label(egui::RichText::new(format!("Serial: {}", device.serial)).size(13.0).color(C_TEXT_MUTED));
+                                                ui.add_space(3.0);
+                                                ui.label(egui::RichText::new(format!("State: {}", device.state)).size(13.0).color(C_TEXT_MUTED));
+                                                ui.add_space(3.0);
+                                                ui.label(egui::RichText::new(format!("Connection: {}", device.connection_info())).size(13.0).color(C_TEXT_MUTED));
+                                            });
+
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                                let is_busy = !self.pending_action.is_empty();
+                                                if let Some((ip, port)) = wifi_endpoint.clone() {
+                                                    if danger_button(ui, "Disconnect").clicked() && !is_busy {
+                                                        self.pending_action = "Disconnecting...".to_string();
+                                                        self.spawn_disconnect(ip.clone(), port);
+                                                    }
+                                                    ui.add_space(8.0);
+                                                }
+                                                if secondary_button(ui, "Screenshot").clicked() && !is_busy {
+                                                    self.pending_action = "Taking screenshot...".to_string();
+                                                    self.spawn_screenshot(device.serial.clone());
+                                                }
+                                            });
+                                        });
                                     });
                                 }
 
                                 // WiFi Connect Section
                                 section_divider(ui);
                                 wifi_frame().show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
                                     ui.label(
                                         egui::RichText::new("WiFi Connect")
                                             .strong()
@@ -736,7 +884,8 @@ impl eframe::App for AdbBroadcastApp {
                                             .size(14.0)
                                     );
                                     ui.add_space(10.0);
-                                    
+                                    let mut port_enter_pressed = false;
+
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new("IP:").strong().color(C_TEXT).size(13.0));
                                         ui.add_space(4.0);
@@ -748,9 +897,14 @@ impl eframe::App for AdbBroadcastApp {
                                         ui.label(egui::RichText::new("Port:").strong().color(C_TEXT).size(13.0));
                                         ui.add_space(4.0);
                                         input_frame().show(ui, |ui| {
-                                            ui.add(egui::TextEdit::singleline(&mut self.wifi_port).desired_width(90.0));
+                                            let port_response = ui.add(egui::TextEdit::singleline(&mut self.wifi_port).desired_width(90.0));
+                                            port_enter_pressed = port_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                         });
                                     });
+
+                                    if port_enter_pressed && self.pending_action.is_empty() {
+                                        self.connect_wifi_from_inputs();
+                                    }
 
                                     ui.add_space(8.0);
                                     ui.horizontal_wrapped(|ui| {
@@ -765,25 +919,7 @@ impl eframe::App for AdbBroadcastApp {
                                     ui.horizontal(|ui| {
                                         let is_busy = !self.pending_action.is_empty();
                                         if success_button(ui, "Connect").clicked() && !is_busy {
-                                            let port = self.wifi_port.parse::<u16>().unwrap_or(5555);
-                                            let ip = self.wifi_ip.trim().to_string();
-                                            if ip.is_empty() {
-                                                self.state.set_status("Please enter IP address", StatusType::Error);
-                                            } else {
-                                                self.pending_action = "Connecting...".to_string();
-                                                self.spawn_connect(ip.clone(), port);
-                                            }
-                                        }
-                                        ui.add_space(8.0);
-                                        if danger_button(ui, "Disconnect").clicked() && !is_busy {
-                                            let port = self.wifi_port.parse::<u16>().unwrap_or(5555);
-                                            let ip = self.wifi_ip.trim();
-                                            if ip.is_empty() {
-                                                self.state.set_status("Please enter IP address", StatusType::Error);
-                                            } else {
-                                                self.pending_action = "Disconnecting...".to_string();
-                                                self.spawn_disconnect(ip.to_string(), port);
-                                            }
+                                            self.connect_wifi_from_inputs();
                                         }
                                     });
                                 });
@@ -1061,6 +1197,82 @@ impl eframe::App for AdbBroadcastApp {
                         });
                     });
             }
+
+            // Screenshot Directory Dialog
+            if self.show_screenshot_dir_dialog {
+                egui::Window::new("Set Screenshot Directory")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_size([560.0, 120.0])
+                    .show(ctx, |ui| {
+                        ui.label("Screenshot save directory:");
+                        ui.add_space(4.0);
+                        input_frame().show(ui, |ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.screenshot_dir_input).desired_width(ui.available_width().max(260.0)));
+                        });
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if primary_button(ui, "Save").clicked() {
+                                self.state.update_screenshot_dir(&self.screenshot_dir_input);
+                                self.show_screenshot_dir_dialog = false;
+                                self.state.set_status("Screenshot directory updated", StatusType::Success);
+                            }
+                            ui.add_space(8.0);
+                            if secondary_button(ui, "Cancel").clicked() {
+                                self.show_screenshot_dir_dialog = false;
+                            }
+                        });
+                    });
+            }
+
+            // Toast notification overlay
+            if let Some(ref msg) = self.toast_message.clone() {
+                self.toast_remaining -= ctx.input(|i| i.stable_dt) as f64;
+                if self.toast_remaining <= 0.0 {
+                    self.toast_message = None;
+                    self.toast_remaining = 0.0;
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    let opacity = if self.toast_remaining < 1.0 {
+                        self.toast_remaining as f32
+                    } else {
+                        1.0
+                    };
+                    let (bg_r, bg_g, bg_b) = if self.toast_is_error {
+                        (198, 40, 40)
+                    } else {
+                        (46, 125, 50)
+                    };
+                    egui::Area::new("toast".into())
+                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
+                        .order(egui::Order::Foreground)
+                        .show(ctx, |ui| {
+                            let bg = egui::Color32::from_rgba_premultiplied(
+                                bg_r, bg_g, bg_b, (220.0 * opacity) as u8,
+                            );
+                            let text_color = egui::Color32::from_rgba_premultiplied(
+                                255, 255, 255, (255.0 * opacity) as u8,
+                            );
+                            egui::Frame::none()
+                                .fill(bg)
+                                .rounding(egui::Rounding::same(8.0))
+                                .inner_margin(egui::Margin::symmetric(20.0, 12.0))
+                                .shadow(egui::epaint::Shadow {
+                                    offset: egui::Vec2::new(0.0, 2.0),
+                                    blur: 12.0,
+                                    spread: 0.0,
+                                    color: egui::Color32::from_black_alpha(40),
+                                })
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(msg)
+                                            .color(text_color)
+                                            .size(13.0)
+                                    );
+                                });
+                        });
+                }
+            }
         });
     }
 }
@@ -1070,14 +1282,14 @@ impl eframe::App for AdbBroadcastApp {
 fn card_frame() -> egui::Frame {
     egui::Frame::none()
         .fill(C_CARD)
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(228, 231, 236)))
-        .rounding(egui::Rounding::same(10.0))
-        .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(222, 227, 234)))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(24.0, 22.0))
         .shadow(egui::epaint::Shadow {
             offset: egui::Vec2::new(0.0, 1.0),
-            blur: 8.0,
+            blur: 4.0,
             spread: 0.0,
-            color: egui::Color32::from_black_alpha(12),
+            color: egui::Color32::from_black_alpha(8),
         })
 }
 
@@ -1100,33 +1312,33 @@ fn card_header(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {
 }
 
 fn section_divider(ui: &mut egui::Ui) {
-    ui.add_space(6.0);
+    ui.add_space(14.0);
     ui.separator();
-    ui.add_space(6.0);
+    ui.add_space(14.0);
 }
 
 fn input_frame() -> egui::Frame {
     egui::Frame::none()
         .fill(C_CARD)
         .stroke(egui::Stroke::new(1.0, C_INPUT_BORDER))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+        .rounding(egui::Rounding::same(7.0))
+        .inner_margin(egui::Margin::symmetric(11.0, 7.0))
 }
 
 fn wifi_frame() -> egui::Frame {
     egui::Frame::none()
         .fill(C_WIFI_BG)
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(190, 218, 240)))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(178, 214, 244)))
         .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+        .inner_margin(egui::Margin::symmetric(16.0, 16.0))
 }
 
 fn info_box<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
     egui::Frame::none()
         .fill(C_INFO_BOX_BG)
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(224, 227, 232)))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 225, 232)))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(16.0, 12.0))
         .show(ui, add_contents)
 }
 
@@ -1138,40 +1350,48 @@ fn status_frame(bg_color: egui::Color32) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(16.0, 12.0))
 }
 
+fn filled_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    fill: egui::Color32,
+    hover_fill: egui::Color32,
+    min_width: f32,
+) -> egui::Response {
+    let galley = ui.fonts(|f| {
+        f.layout_no_wrap(
+            label.to_string(),
+            egui::FontId::new(13.0, egui::FontFamily::Proportional),
+            egui::Color32::WHITE,
+        )
+    });
+    let size = egui::vec2(min_width.max(galley.size().x + 28.0), 34.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let button_fill = if response.hovered() { hover_fill } else { fill };
+
+    ui.painter().rect_filled(rect, egui::Rounding::same(7.0), button_fill);
+    ui.painter().galley(
+        rect.center() - galley.size() * 0.5,
+        galley,
+        egui::Color32::WHITE,
+    );
+
+    response
+}
+
 fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE).size(13.0))
-            .fill(C_PRIMARY)
-            .rounding(egui::Rounding::same(6.0))
-            .min_size(egui::vec2(80.0, 34.0))
-    )
+    filled_button(ui, label, C_PRIMARY, C_PRIMARY_HOVER, 80.0)
 }
 
 fn success_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE).size(13.0))
-            .fill(C_SUCCESS)
-            .rounding(egui::Rounding::same(6.0))
-            .min_size(egui::vec2(80.0, 34.0))
-    )
+    filled_button(ui, label, C_SUCCESS, C_SUCCESS_HOVER, 80.0)
 }
 
 fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE).size(13.0))
-            .fill(C_DANGER)
-            .rounding(egui::Rounding::same(6.0))
-            .min_size(egui::vec2(80.0, 34.0))
-    )
+    filled_button(ui, label, C_DANGER, C_DANGER_HOVER, 88.0)
 }
 
 fn secondary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE).size(13.0))
-            .fill(C_SECONDARY)
-            .rounding(egui::Rounding::same(6.0))
-            .min_size(egui::vec2(80.0, 34.0))
-    )
+    filled_button(ui, label, C_SECONDARY, C_SECONDARY_HOVER, 88.0)
 }
 
 fn quick_ip_btn(ui: &mut egui::Ui, ip: &str, target: &mut String) {

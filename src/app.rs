@@ -100,6 +100,10 @@ impl AppState {
         let _ = self.config_manager.set_adb_path(path);
     }
 
+    pub fn update_screenshot_dir(&mut self, path: &str) {
+        let _ = self.config_manager.set_screenshot_dir(path);
+    }
+
     pub fn connect_wifi(&mut self, ip: &str, port: u16) -> Result<String, String> {
         self.device_manager.connect_wifi(ip, port)
     }
