@@ -18,6 +18,8 @@ pub struct Config {
     pub window_height: u32,
     #[serde(default)]
     pub quick_contents: Vec<String>,
+    #[serde(default = "default_wifi_ips")]
+    pub wifi_ips: Vec<String>,
     #[serde(default = "default_screenshot_dir")]
     pub screenshot_dir: String,
 }
@@ -46,6 +48,14 @@ fn default_screenshot_dir() -> String {
     r#"D:\data\files\adb"#.to_string()
 }
 
+fn default_wifi_ips() -> Vec<String> {
+    vec![
+        "192.168.137.".to_string(),
+        "192.168.137.56".to_string(),
+        "192.168.137.204".to_string(),
+    ]
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -56,6 +66,7 @@ impl Default for Config {
             window_width: default_window_width(),
             window_height: default_window_height(),
             quick_contents: Vec::new(),
+            wifi_ips: default_wifi_ips(),
             screenshot_dir: default_screenshot_dir(),
         }
     }
@@ -146,6 +157,20 @@ impl ConfigManager {
     pub fn add_quick_content(&mut self, content: String) -> Result<(), String> {
         if !self.config.quick_contents.contains(&content) {
             self.config.quick_contents.push(content);
+            self.save()
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn set_wifi_ips(&mut self, ips: Vec<String>) -> Result<(), String> {
+        self.config.wifi_ips = ips;
+        self.save()
+    }
+
+    pub fn add_wifi_ip(&mut self, ip: String) -> Result<(), String> {
+        if !self.config.wifi_ips.contains(&ip) {
+            self.config.wifi_ips.push(ip);
             self.save()
         } else {
             Ok(())

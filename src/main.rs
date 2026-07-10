@@ -180,6 +180,8 @@ struct AdbBroadcastApp {
     wifi_port: String,
     custom_content: String,
     quick_contents: Vec<String>,
+    wifi_tags: Vec<String>,
+    custom_wifi_tag: String,
     selected_device_serial: String,
     show_adb_path_dialog: bool,
     show_screenshot_dir_dialog: bool,
@@ -191,6 +193,8 @@ struct AdbBroadcastApp {
     toast_message: Option<String>,
     toast_remaining: f64,
     toast_is_error: bool,
+    show_qr_dialog: bool,
+    qr_content: String,
 }
 
 impl AdbBroadcastApp {
@@ -203,6 +207,7 @@ impl AdbBroadcastApp {
             wifi_ip: String::new(),
             wifi_port: "5555".to_string(),
             custom_content: String::new(),
+            custom_wifi_tag: String::new(),
             quick_contents: vec![
                 r#"{"dock":"D-1"}"#.to_string(),
                 r#"{"dock":"D-7"}"#.to_string(),
@@ -211,6 +216,7 @@ impl AdbBroadcastApp {
                 "https://example.com".to_string(),
                 r#"{"code":"12345","type":"qr"}"#.to_string(),
             ],
+            wifi_tags: Vec::new(),
             selected_device_serial: String::new(),
             show_adb_path_dialog: false,
             show_screenshot_dir_dialog: false,
@@ -222,6 +228,8 @@ impl AdbBroadcastApp {
             toast_message: None,
             toast_remaining: 0.0,
             toast_is_error: false,
+            show_qr_dialog: false,
+            qr_content: String::new(),
         };
 
         // Merge saved quick contents
@@ -230,6 +238,9 @@ impl AdbBroadcastApp {
                 app.quick_contents.push(item.clone());
             }
         }
+
+        // Load wifi IP tags from config
+        app.wifi_tags = app.state.config_manager.get().wifi_ips.clone();
 
         // Try to load initial devices
         if let Ok(devices) = app.state.refresh_devices() {
@@ -907,12 +918,65 @@ impl eframe::App for AdbBroadcastApp {
                                     }
 
                                     ui.add_space(8.0);
+                                    ui.label(egui::RichText::new("Quick IP").strong().color(C_QUICK_TEXT).size(12.0));
+                                    ui.add_space(4.0);
                                     ui.horizontal_wrapped(|ui| {
-                                        quick_ip_btn(ui, "192.168.137.", &mut self.wifi_ip);
+                                        let mut to_remove: Option<String> = None;
+                                        for ip in &self.wifi_tags {
+                                            let label = if ip.len() > 14 {
+                                                format!("{}..", &ip[..14])
+                                            } else {
+                                                ip.clone()
+                                            };
+                                            let btn_response = ui.add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(format!("{}  ×", label)).size(11.0).color(C_QUICK_TEXT)
+                                                )
+                                                .fill(C_QUICK_BG)
+                                                .stroke(egui::Stroke::new(1.0, C_QUICK_BORDER))
+                                                .rounding(egui::Rounding::same(5.0))
+                                                .min_size(egui::vec2(0.0, 28.0))
+                                            );
+                                            if btn_response.clicked() {
+                                                if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+                                                    let rect = btn_response.rect;
+                                                    let x_zone = egui::Rect::from_min_max(
+                                                        egui::pos2(rect.right() - 24.0, rect.top()),
+                                                        rect.right_bottom(),
+                                                    );
+                                                    if x_zone.contains(pointer) {
+                                                        to_remove = Some(ip.clone());
+                                                    } else {
+                                                        self.wifi_ip = ip.clone();
+                                                        self.state.set_status(&format!("IP set: {}", ip), StatusType::Success);
+                                                    }
+                                                }
+                                            }
+                                            ui.add_space(4.0);
+                                        }
+                                        if let Some(ip) = to_remove {
+                                            self.wifi_tags.retain(|i| i != &ip);
+                                            let _ = self.state.config_manager.set_wifi_ips(self.wifi_tags.clone());
+                                            self.state.set_status(&format!("Removed: {}", ip), StatusType::Info);
+                                        }
+                                    });
+
+                                    ui.add_space(6.0);
+                                    ui.horizontal(|ui| {
+                                        let add_width = (ui.available_width() - 70.0).max(100.0);
+                                        input_frame().show(ui, |ui| {
+                                            ui.add(egui::TextEdit::singleline(&mut self.custom_wifi_tag).desired_width(add_width).hint_text("Add IP..."));
+                                        });
                                         ui.add_space(6.0);
-                                        quick_ip_btn(ui, "192.168.137.56", &mut self.wifi_ip);
-                                        ui.add_space(6.0);
-                                        quick_ip_btn(ui, "192.168.137.204", &mut self.wifi_ip);
+                                        if secondary_button(ui, "Add").clicked() {
+                                            let ip = self.custom_wifi_tag.trim();
+                                            if !ip.is_empty() {
+                                                self.wifi_tags.push(ip.to_string());
+                                                let _ = self.state.config_manager.add_wifi_ip(ip.to_string());
+                                                self.custom_wifi_tag.clear();
+                                                self.state.set_status("IP address added", StatusType::Success);
+                                            }
+                                        }
                                     });
 
                                     ui.add_space(10.0);
@@ -958,22 +1022,56 @@ impl eframe::App for AdbBroadcastApp {
                                     );
                                 });
 
+                                ui.add_space(6.0);
+                                if secondary_button(ui, "Generate QR Code").clicked() {
+                                    self.qr_content = self.content_input.clone();
+                                    self.show_qr_dialog = true;
+                                }
+
                                 // Quick Content
                                 section_divider(ui);
                                 ui.label(egui::RichText::new("Quick Content").strong().color(C_QUICK_TEXT).size(14.0));
                                 ui.add_space(8.0);
                                 ui.horizontal_wrapped(|ui| {
-                                    for content in self.quick_contents.clone() {
-                                        let label = if content.len() > 22 {
-                                            format!("{}...", &content[..22])
+                                    let mut to_remove: Option<String> = None;
+                                    for content in &self.quick_contents {
+                                        let label = if content.len() > 16 {
+                                            format!("{}..", &content[..16])
                                         } else {
                                             content.clone()
                                         };
-                                        if quick_content_btn(ui, &label).clicked() {
-                                            self.content_input = content.clone();
-                                            self.state.set_status(&format!("Content set: {}", content), StatusType::Success);
+                                        // Combined tag: button + X
+                                        let btn_response = ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new(format!("{}  ×", label)).size(12.0).color(C_QUICK_TEXT)
+                                            )
+                                            .fill(C_QUICK_BG)
+                                            .stroke(egui::Stroke::new(1.0, C_QUICK_BORDER))
+                                            .rounding(egui::Rounding::same(5.0))
+                                            .min_size(egui::vec2(0.0, 28.0))
+                                        );
+                                        if btn_response.clicked() {
+                                            // Check if click was on the right side (X area)
+                                            if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+                                                let rect = btn_response.rect;
+                                                let x_zone = egui::Rect::from_min_max(
+                                                    egui::pos2(rect.right() - 24.0, rect.top()),
+                                                    rect.right_bottom(),
+                                                );
+                                                if x_zone.contains(pointer) {
+                                                    to_remove = Some(content.clone());
+                                                } else {
+                                                    self.content_input = content.clone();
+                                                    self.state.set_status(&format!("Content set: {}", content), StatusType::Success);
+                                                }
+                                            }
                                         }
-                                        ui.add_space(6.0);
+                                        ui.add_space(4.0);
+                                    }
+                                    if let Some(content) = to_remove {
+                                        self.quick_contents.retain(|c| c != &content);
+                                        let _ = self.state.config_manager.set_quick_contents(self.quick_contents.clone());
+                                        self.state.set_status(&format!("Removed: {}", content), StatusType::Info);
                                     }
                                 });
 
@@ -1220,6 +1318,82 @@ impl eframe::App for AdbBroadcastApp {
                             ui.add_space(8.0);
                             if secondary_button(ui, "Cancel").clicked() {
                                 self.show_screenshot_dir_dialog = false;
+                            }
+                        });
+                    });
+            }
+
+            // QR Code Dialog
+            if self.show_qr_dialog {
+                egui::Window::new("QR Code")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_size([360.0, 420.0])
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new("QR Code from content:")
+                                .size(12.0)
+                                .color(C_TEXT_MUTED)
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(&self.qr_content)
+                                .size(11.0)
+                                .color(C_TEXT)
+                        );
+                        ui.add_space(12.0);
+                        
+                        // Render QR code
+                        if !self.qr_content.is_empty() {
+                            if let Ok(qr_code) = qrcode::QrCode::new(self.qr_content.as_bytes()) {
+                                let module_count = qr_code.width();
+                                let available = ui.available_width().min(300.0);
+                                let cell_size = (available / module_count as f32).floor().max(2.0);
+                                let img_size = cell_size * module_count as f32;
+                                
+                                let (response, painter) = ui.allocate_painter(
+                                    egui::vec2(img_size, img_size),
+                                    egui::Sense::hover()
+                                );
+                                let rect = response.rect;
+                                
+                                // White background
+                                painter.rect_filled(rect, egui::Rounding::same(4.0), egui::Color32::WHITE);
+                                
+                                // Draw QR modules
+                                for y in 0..module_count {
+                                    for x in 0..module_count {
+                                        if qr_code[(x, y)] == qrcode::Color::Dark {
+                                            let cell_rect = egui::Rect::from_min_size(
+                                                egui::pos2(
+                                                    rect.min.x + x as f32 * cell_size,
+                                                    rect.min.y + y as f32 * cell_size,
+                                                ),
+                                                egui::vec2(cell_size, cell_size),
+                                            );
+                                            painter.rect_filled(cell_rect, egui::Rounding::ZERO, C_TEXT);
+                                        }
+                                    }
+                                }
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("Failed to generate QR code")
+                                        .color(C_ERROR_TEXT)
+                                        .size(12.0)
+                                );
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new("No content")
+                                    .color(C_TEXT_LIGHT)
+                                    .size(12.0)
+                            );
+                        }
+                        
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if secondary_button(ui, "Close").clicked() {
+                                self.show_qr_dialog = false;
                             }
                         });
                     });
