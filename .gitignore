@@ -1,22 +1,21 @@
-# Rust build artifacts
-/target/
-
-# WorkBuddy project data
-/.workbuddy/
-
-# Generated icon script (icons themselves are kept in assets/)
-generate_icon.py
+# Rust build output
+/target
 
 # IDE
-.vscode/
 .idea/
-*.swp
-*.swo
-*~
+*.iml
+.vscode/
+
+# WorkBuddy workspace data
+.workbuddy/
+
+# Icon generator script (icons themselves are kept in assets/)
+generate_icon.py
+
+# Temporary screenshots / debug scripts
+/*.png
+/measure.py
 
 # OS
-.DS_Store
 Thumbs.db
-
-# Old backup files
-*.old
+Desktop.ini
