@@ -229,6 +229,7 @@ struct AdbBroadcastApp {
     screenshot_dir_input: String,
     apk_path_input: String,
     text_input: String,
+    append_enter: bool,
     last_connected_ip: Option<String>,
     pending_action: String,
     bg_queue: Arc<Mutex<Vec<BgTaskResult>>>,
@@ -265,6 +266,7 @@ impl AdbBroadcastApp {
             screenshot_dir_input: String::new(),
             apk_path_input: String::new(),
             text_input: String::new(),
+            append_enter: false,
             last_connected_ip: None,
             pending_action: String::new(),
             bg_queue: Arc::new(Mutex::new(Vec::new())),
@@ -801,7 +803,7 @@ impl AdbBroadcastApp {
         });
     }
 
-    fn spawn_input_text(&self, content: String, device_serial: String) {
+    fn spawn_input_text(&self, content: String, device_serial: String, append_enter: bool) {
         let adb_path = self.state.config_manager.get().adb_path.clone();
         let queue = self.bg_queue.clone();
         thread::spawn(move || {
@@ -819,7 +821,11 @@ impl AdbBroadcastApp {
                 return;
             }
             let escaped = escape_input_text(&content);
-            let shell_cmd = format!("input text {}", escaped);
+            let mut shell_cmd = format!("input text {}", escaped);
+            // 勾选「最后附带回车」时，文本写入完成后追加回车键（KEYCODE_ENTER = 66），模拟扫码枪扫入效果
+            if append_enter {
+                shell_cmd.push_str("; input keyevent 66");
+            }
             let output = std::process::Command::new(&adb_path)
                 .creation_flags(0x08000000)
                 .args(["-s", &device_serial, "shell", &shell_cmd])
@@ -830,7 +836,8 @@ impl AdbBroadcastApp {
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     let result_text = format!("{}{}", stdout, stderr);
                     let (success, msg) = if o.status.success() {
-                        (true, "文本已写入".to_string())
+                        // 按是否附加回车给出不同回执，便于确认扫码枪模式已生效
+                        (true, if append_enter { "文本已写入（已附带回车）".to_string() } else { "文本已写入".to_string() })
                     } else {
                         (false, result_text.trim().to_string())
                     };
@@ -1273,6 +1280,11 @@ impl AdbBroadcastApp {
                     );
                 });
 
+                ui.add_space(8.0);
+                // 模拟扫码枪：勾选后写入文本完成时自动追加一次回车键（KEYCODE_ENTER）
+                ui.checkbox(&mut self.append_enter, "最后附带回车（模拟扫码枪）")
+                    .on_hover_text("勾选后，文本写入完成时会向设备额外发送一次回车键（KEYCODE_ENTER），与扫码枪扫入效果一致");
+
                 ui.add_space(10.0);
                 ui.label(
                     egui::RichText::new("提示：仅支持 ASCII 字符，空格与换行自动转义为 %s，中文等字符将转换为 ?")
@@ -1291,7 +1303,7 @@ impl AdbBroadcastApp {
                         } else {
                             self.pending_action = "正在写入文本...".to_string();
                             if let Some(ref device) = self.state.selected_device {
-                                self.spawn_input_text(self.text_input.clone(), device.serial.clone());
+                                self.spawn_input_text(self.text_input.clone(), device.serial.clone(), self.append_enter);
                             }
                         }
                     }
