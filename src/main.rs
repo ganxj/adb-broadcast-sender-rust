@@ -3,6 +3,7 @@
 use eframe::egui;
 use crate::app::{AppState, StatusType};
 use crate::models::device::Device;
+use crate::adb::broadcast_manager::BroadcastManager;
 use crate::adb::device_manager::DeviceManager;
 use std::os::windows::process::CommandExt;
 use std::sync::{Arc, Mutex};
@@ -74,9 +75,23 @@ enum BgOp {
     ConnectWifi,
     DisconnectWifi,
     SendBroadcast,
+    /// 批量发送中的单条结果（用于逐条写入广播历史）
+    SendBroadcastBatchItem,
+    /// 批量发送全部结束（message 内为汇总结果）
+    SendBroadcastBatchDone,
     TakeScreenshot,
     InputText,
     InstallApk,
+}
+
+/// 批量发送进度：工作线程写、UI 线程读，用于弹框里的进度条与「当前发送」展示
+#[derive(Debug, Default)]
+struct BatchProgress {
+    total: usize,
+    done: usize,
+    success: usize,
+    failed: usize,
+    current: String,
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +253,14 @@ struct AdbBroadcastApp {
     toast_is_error: bool,
     show_qr_dialog: bool,
     qr_content: String,
+    // ===== 批量发送弹框状态 =====
+    show_batch_dialog: bool,
+    batch_input: String,
+    batch_error: String,
+    batch_running: bool,
+    batch_finished: bool,
+    batch_summary: String,
+    batch_progress: Arc<Mutex<BatchProgress>>,
 }
 
 impl AdbBroadcastApp {
@@ -275,6 +298,13 @@ impl AdbBroadcastApp {
             toast_is_error: false,
             show_qr_dialog: false,
             qr_content: String::new(),
+            show_batch_dialog: false,
+            batch_input: String::new(),
+            batch_error: String::new(),
+            batch_running: false,
+            batch_finished: false,
+            batch_summary: String::new(),
+            batch_progress: Arc::new(Mutex::new(BatchProgress::default())),
         };
 
         // Merge saved quick contents
@@ -484,6 +514,21 @@ impl AdbBroadcastApp {
                         self.toast_is_error = true;
                         self.state.set_status(&result.message, StatusType::Error);
                     }
+                }
+                BgOp::SendBroadcastBatchItem => {
+                    // 批量发送的单条结果：只写历史，不打断输入框与弹框
+                    if let (Some(content), Some(device)) = (&result.broadcast_content, &result.broadcast_device) {
+                        let error = if result.success { None } else { Some(result.message.as_str()) };
+                        self.state.add_broadcast_history(content, device, result.success, error);
+                    }
+                }
+                BgOp::SendBroadcastBatchDone => {
+                    self.pending_action.clear();
+                    self.batch_running = false;
+                    self.batch_finished = true;
+                    self.batch_summary = result.message.clone();
+                    let status = if result.success { StatusType::Success } else { StatusType::Error };
+                    self.state.set_status(&result.message, status);
                 }
                 BgOp::TakeScreenshot => {
                     self.pending_action.clear();
@@ -803,6 +848,133 @@ impl AdbBroadcastApp {
         });
     }
 
+    /// 打开批量发送弹框（每次打开都重置上一次的结果与进度）
+    fn open_batch_dialog(&mut self) {
+        self.show_batch_dialog = true;
+        self.batch_running = false;
+        self.batch_finished = false;
+        self.batch_summary.clear();
+        self.batch_error.clear();
+        if let Ok(mut p) = self.batch_progress.lock() {
+            *p = BatchProgress::default();
+        }
+    }
+
+    /// 校验输入并启动批量发送
+    fn start_batch_send(&mut self) {
+        let lines = batch_lines(&self.batch_input);
+        if lines.is_empty() {
+            self.batch_error = "请输入要发送的内容，每行一条".to_string();
+            return;
+        }
+        if self.state.selected_device.is_none() {
+            self.batch_error = "请先在「选择设备」中选一台设备".to_string();
+            return;
+        }
+        self.batch_error.clear();
+        let action = if self.action_input.trim().is_empty() {
+            None
+        } else {
+            Some(self.action_input.trim().to_string())
+        };
+        let serial = match &self.state.selected_device {
+            Some(device) => device.serial.clone(),
+            None => return,
+        };
+        if let Ok(mut p) = self.batch_progress.lock() {
+            *p = BatchProgress {
+                total: lines.len(),
+                ..BatchProgress::default()
+            };
+        }
+        self.batch_running = true;
+        self.batch_finished = false;
+        self.batch_summary.clear();
+        self.pending_action = "正在批量发送...".to_string();
+        self.spawn_batch_broadcast(lines, action, serial);
+    }
+
+    /// 批量发送：工作线程内串行执行，一条 adb broadcast 发完再发下一条
+    fn spawn_batch_broadcast(&self, lines: Vec<String>, action: Option<String>, device_serial: String) {
+        let adb_path = self.state.config_manager.get().adb_path.clone();
+        let queue = self.bg_queue.clone();
+        let progress = self.batch_progress.clone();
+        thread::spawn(move || {
+            // 复用 BroadcastManager，避免重复实现 adb 命令拼装与结果判定
+            let mut manager = BroadcastManager::new(&adb_path);
+            let total = lines.len();
+            let mut success = 0usize;
+            let mut errors: Vec<String> = Vec::new();
+
+            for (idx, line) in lines.iter().enumerate() {
+                // 记录「当前正在发送」的内容，供弹框展示
+                if let Ok(mut p) = progress.lock() {
+                    p.current = line.clone();
+                }
+
+                let (ok, msg) = match manager.send_broadcast(&device_serial, line, action.as_deref()) {
+                    Ok(_) => {
+                        success += 1;
+                        (true, "Broadcast sent successfully!".to_string())
+                    }
+                    Err(e) => {
+                        errors.push(format!("第{}行「{}」: {}", idx + 1, preview_text(line, 30), e));
+                        (false, e)
+                    }
+                };
+
+                if let Ok(mut p) = progress.lock() {
+                    p.done = idx + 1;
+                    p.success = success;
+                    p.failed = errors.len();
+                }
+
+                let _ = queue.lock().map(|mut q| {
+                    q.push(BgTaskResult {
+                        op: BgOp::SendBroadcastBatchItem,
+                        success: ok,
+                        message: msg,
+                        devices: None,
+                        broadcast_content: Some(line.clone()),
+                        broadcast_device: Some(device_serial.clone()),
+                    });
+                });
+            }
+
+            if let Ok(mut p) = progress.lock() {
+                p.current.clear();
+            }
+
+            // 汇总：成功/失败条数 + 最多 5 条失败明细
+            let mut summary = format!(
+                "批量发送完成：共 {} 条，成功 {} 条，失败 {} 条",
+                total,
+                success,
+                errors.len()
+            );
+            if !errors.is_empty() {
+                summary.push_str("\n失败明细：");
+                for (i, err) in errors.iter().take(5).enumerate() {
+                    summary.push_str(&format!("\n{}. {}", i + 1, err));
+                }
+                if errors.len() > 5 {
+                    summary.push_str(&format!("\n… 另有 {} 条失败未列出", errors.len() - 5));
+                }
+            }
+
+            let _ = queue.lock().map(|mut q| {
+                q.push(BgTaskResult {
+                    op: BgOp::SendBroadcastBatchDone,
+                    success: errors.is_empty(),
+                    message: summary,
+                    devices: None,
+                    broadcast_content: None,
+                    broadcast_device: None,
+                });
+            });
+        });
+    }
+
     fn spawn_input_text(&self, content: String, device_serial: String, append_enter: bool) {
         let adb_path = self.state.config_manager.get().adb_path.clone();
         let queue = self.bg_queue.clone();
@@ -983,11 +1155,7 @@ impl AdbBroadcastApp {
                 ui.horizontal_wrapped(|ui| {
                     let mut to_remove: Option<String> = None;
                     for ip in &self.wifi_tags {
-                        let label = if ip.len() > 14 {
-                            format!("{}..", &ip[..14])
-                        } else {
-                            ip.clone()
-                        };
+                        let label = preview_text(ip, 18);
                         let btn_response = ui.add(
                             egui::Button::new(
                                 egui::RichText::new(format!("{}  ×", label)).size(11.0).color(C_QUICK_TEXT)
@@ -1415,11 +1583,7 @@ impl AdbBroadcastApp {
                 ui.horizontal_wrapped(|ui| {
                     let mut to_remove: Option<String> = None;
                     for content in &self.quick_contents {
-                        let label = if content.len() > 16 {
-                            format!("{}..", &content[..16])
-                        } else {
-                            content.clone()
-                        };
+                        let label = preview_text(content, 16);
                         let btn_response = ui.add(
                             egui::Button::new(
                                 egui::RichText::new(format!("{}  ×", label)).size(12.0).color(C_QUICK_TEXT)
@@ -1501,6 +1665,10 @@ impl AdbBroadcastApp {
                     if secondary_button(ui, "生成二维码").clicked() {
                         self.qr_content = self.content_input.clone();
                         self.show_qr_dialog = true;
+                    }
+                    ui.add_space(8.0);
+                    if secondary_button(ui, "批量发送").clicked() && !is_busy {
+                        self.open_batch_dialog();
                     }
                 });
             });
@@ -1591,11 +1759,8 @@ impl AdbBroadcastApp {
                                                     });
                                                 });
                                                 ui.add_space(6.0);
-                                                let content_preview = if broadcast.content.len() > 100 {
-                                                    format!("{}...", &broadcast.content[..100])
-                                                } else {
-                                                    broadcast.content.clone()
-                                                };
+                                                // 中文等多字节内容按字符截断，避免按字节切片 panic
+                                                let content_preview = preview_text(&broadcast.content, 100);
                                                 ui.label(
                                                     egui::RichText::new(content_preview)
                                                         .color(C_TEXT)
@@ -1812,6 +1977,11 @@ impl eframe::App for AdbBroadcastApp {
         // Process completed background tasks
         self.process_bg_results();
 
+        // 批量发送进行中：持续请求重绘，让弹框里的进度随工作线程刷新
+        if self.batch_running {
+            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+        }
+
         // ===== Left sidebar =====
         egui::SidePanel::left(egui::Id::new("sidebar_panel"))
             .exact_width(210.0)
@@ -1914,6 +2084,151 @@ impl eframe::App for AdbBroadcastApp {
                             self.show_qr_dialog = false;
                         }
                     });
+                });
+        }
+
+        // ===== 批量发送弹框 =====
+        if self.show_batch_dialog {
+            // 半透明遮罩：发送过程中挡住背后交互，防止误点其它按钮
+            egui::Area::new(egui::Id::new("batch_backdrop"))
+                .order(egui::Order::Middle)
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    let screen = ctx.screen_rect();
+                    let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+                    ui.painter()
+                        .rect_filled(rect, egui::Rounding::ZERO, egui::Color32::from_black_alpha(70));
+                });
+
+            egui::Window::new("批量发送")
+                .collapsible(false)
+                .resizable(false)
+                .movable(false)
+                .order(egui::Order::Middle)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .default_width(560.0)
+                .show(ctx, |ui| {
+                    // 宽度锁定在 540~560：内容再长也只换行/滚动，不把弹框横向撑开
+                    ui.set_min_width(540.0);
+                    ui.set_max_width(560.0);
+
+                    if self.batch_running {
+                        // ---- 发送中：转圈 + 进度条，不提供关闭入口 ----
+                        let (total, done, success, failed, current) = self
+                            .batch_progress
+                            .lock()
+                            .map(|p| (p.total, p.done, p.success, p.failed, p.current.clone()))
+                            .unwrap_or((0, 0, 0, 0, String::new()));
+
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(16.0).color(C_PRIMARY));
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(format!("正在发送  {}/{}", done, total))
+                                    .size(13.5)
+                                    .strong()
+                                    .color(C_TEXT),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                status_badge(
+                                    ui,
+                                    &format!("成功 {} · 失败 {}", success, failed),
+                                    C_QUICK_BG,
+                                    C_QUICK_TEXT,
+                                );
+                            });
+                        });
+                        ui.add_space(10.0);
+                        let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                        ui.add(
+                            egui::ProgressBar::new(frac)
+                                .desired_width(ui.available_width())
+                                .show_percentage(),
+                        );
+                        ui.add_space(10.0);
+                        info_box(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            let text = if current.is_empty() {
+                                "当前内容：-".to_string()
+                            } else {
+                                format!("当前内容：{}", preview_text(&current, 40))
+                            };
+                            ui.label(egui::RichText::new(text).size(12.0).color(C_TEXT_MUTED));
+                        });
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("发送过程中弹框不会关闭，请等待全部发送完成")
+                                .size(11.5)
+                                .color(C_TEXT_LIGHT),
+                        );
+                    } else if self.batch_finished {
+                        // ---- 发送结束：汇总结果（失败明细多时框内滚动，限高 200）----
+                        info_box(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            egui::ScrollArea::vertical()
+                                .id_salt("batch_summary_scroll")
+                                .max_height(200.0)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&self.batch_summary).size(12.5).color(C_TEXT),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                        });
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            if primary_button(ui, "关闭").clicked() {
+                                self.show_batch_dialog = false;
+                            }
+                        });
+                    } else {
+                        // ---- 输入阶段 ----
+                        ui.label(
+                            egui::RichText::new("每行一条广播内容，将按顺序逐条发送（发完一条再发下一条）。")
+                                .size(12.5)
+                                .color(C_TEXT_MUTED),
+                        );
+                        ui.add_space(8.0);
+                        input_frame().show(ui, |ui| {
+                            // 固定可视高度：内容再多也只在框内滚动，不会把弹框撑大
+                            egui::ScrollArea::vertical()
+                                .id_salt("batch_input_scroll")
+                                .max_height(180.0)
+                                .show(ui, |ui| {
+                                    // 宽度取滚动区实际可用宽度，避免出现横向滚动条
+                                    let wrap_w = ui.available_width();
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut self.batch_input)
+                                            .desired_rows(9)
+                                            .desired_width(wrap_w)
+                                            .hint_text("一行一条，例如：\n{\"dock\":\"D-1\"}\n{\"dock\":\"D-7\"}"),
+                                    );
+                                });
+                        });
+                        ui.add_space(6.0);
+                        let count = batch_lines(&self.batch_input).len();
+                        ui.label(
+                            egui::RichText::new(format!("待发送 {} 条（空行自动忽略）", count))
+                                .size(12.0)
+                                .color(C_TEXT_LIGHT),
+                        );
+                        if !self.batch_error.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(&self.batch_error).size(12.0).color(C_ERROR_TEXT));
+                        }
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if primary_button(ui, "开始发送").clicked() {
+                                self.start_batch_send();
+                            }
+                            ui.add_space(8.0);
+                            if secondary_button(ui, "取消").clicked() {
+                                self.show_batch_dialog = false;
+                            }
+                        });
+                    }
                 });
         }
 
@@ -2128,6 +2443,26 @@ fn escape_input_text(s: &str) -> String {
         }
     }
     out
+}
+
+
+// 把弹框里的多行输入拆成待发送列表：去掉首尾空白、忽略空行
+fn batch_lines(input: &str) -> Vec<String> {
+    input
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect()
+}
+
+// 按「字符」截断文本（内容可能含中文，按字节切片会 panic）
+fn preview_text(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max_chars).collect();
+    format!("{}..", head)
 }
 
 
